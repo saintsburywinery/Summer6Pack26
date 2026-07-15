@@ -1,0 +1,3 @@
+cd ~/commerce7-dashboard/summer6pack_github
+git remote add origin https://github.com/<saintsburywinery>/<Summer6Pack26>.git
+git branch -M main && git push -u origin main
