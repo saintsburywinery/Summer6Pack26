@@ -219,7 +219,10 @@ var DAY_PACE=Math.round(33644/DAILY.length); // even-pace reference ($/day to hi
 
 var liveData={audiences:{},sku:{},channel:{},daily:{},totals:{}};
 
-var cfg={binId:'',apiKey:''};
+// Auto-connect for all viewers: bin ID + a READ-ONLY jsonbin access key (safe to
+// publish — it can only read this bin, never write). The write key lives only in
+// GitHub Actions. A manually-saved config in localStorage still overrides this.
+var cfg={binId:'6a559cfef5f4af5e298b6d6e',apiKey:'$2a$10$LWYFDNk/Tzch.RdiMU7OveKaYlHIc50uNRSt4d/J147dwNpocRJwq'};
 try{var c=JSON.parse(localStorage.getItem('s6p26c')||'{}');if(c.binId)cfg=c;}catch(e){}
 
 function fmtN(v,f,dp){var n=parseFloat(v);if(v===null||v===undefined||v===''||isNaN(n))return null;
