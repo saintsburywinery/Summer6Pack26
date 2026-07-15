@@ -1,0 +1,35 @@
+name: Push Summer 6-Pack actuals
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # every 15 min (UTC). GitHub cron is best-effort; may lag a few min.
+  workflow_dispatch: {}       # manual "Run workflow" button
+
+concurrency:
+  group: push-actuals
+  cancel-in-progress: false
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - name: Prepare audience map
+        env:
+          AUDIENCE_KEY: ${{ secrets.AUDIENCE_KEY }}
+        run: |
+          if [ -f audiences.json.enc ] && [ -n "$AUDIENCE_KEY" ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 -in audiences.json.enc -out audiences.json -pass env:AUDIENCE_KEY
+          fi
+      - name: Push actuals
+        env:
+          COMMERCE7_APP_ID: ${{ secrets.COMMERCE7_APP_ID }}
+          COMMERCE7_SECRET: ${{ secrets.COMMERCE7_SECRET }}
+          COMMERCE7_TENANT: ${{ secrets.COMMERCE7_TENANT }}
+          JSONBIN_BIN_ID: ${{ secrets.JSONBIN_BIN_ID }}
+          JSONBIN_ACCESS_KEY: ${{ secrets.JSONBIN_ACCESS_KEY }}
+        run: python3 push_actuals_ci.py
