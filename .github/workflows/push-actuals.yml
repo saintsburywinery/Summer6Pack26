@@ -25,11 +25,18 @@ jobs:
           if [ -f audiences.json.enc ] && [ -n "$AUDIENCE_KEY" ]; then
             openssl enc -d -aes-256-cbc -pbkdf2 -in audiences.json.enc -out audiences.json -pass env:AUDIENCE_KEY
           fi
-      - name: Push actuals
+      - name: Push actuals (loop every 5 min for ~55 min)
+        # GitHub only fires the cron ~hourly regardless of "*/15", so each run
+        # self-loops to keep the bin fresh to ~5 min. Public repo = free minutes.
         env:
           COMMERCE7_APP_ID: ${{ secrets.COMMERCE7_APP_ID }}
           COMMERCE7_SECRET: ${{ secrets.COMMERCE7_SECRET }}
           COMMERCE7_TENANT: ${{ secrets.COMMERCE7_TENANT }}
           JSONBIN_BIN_ID: ${{ secrets.JSONBIN_BIN_ID }}
           JSONBIN_ACCESS_KEY: ${{ secrets.JSONBIN_ACCESS_KEY }}
-        run: python3 push_actuals_ci.py
+        run: |
+          for i in $(seq 1 12); do
+            echo "--- push $i/12 ---"
+            python3 push_actuals_ci.py || true
+            [ "$i" -lt 12 ] && sleep 300
+          done
