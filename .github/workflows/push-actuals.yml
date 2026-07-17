@@ -38,5 +38,5 @@ jobs:
           for i in $(seq 1 12); do
             echo "--- push $i/12 ---"
             python3 push_actuals_ci.py || true
-            [ "$i" -lt 12 ] && sleep 300
+            if [ "$i" -lt 12 ]; then sleep 300; fi
           done
