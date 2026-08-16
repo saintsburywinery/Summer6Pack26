@@ -36,6 +36,10 @@ on:
         default: encrypted
         type: choice
         options: [encrypted, plaintext]
+      recipient_cert_b64:
+        description: "Optional base64 X.509 cert. Encrypts to this public key instead of AUDIENCE_KEY. Public keys are safe to publish."
+        required: false
+        default: ""
 
 concurrency:
   group: shipping-promo-roi
@@ -72,21 +76,49 @@ jobs:
             echo "::error::analysis failed"; tail -40 ./_data/report.txt; exit 1; }
           echo "report generated: $(wc -l < ./_data/report.txt) lines"
 
+      - name: Run total shipping subsidy analysis
+        run: |
+          END="${{ inputs.promo_end }}"
+          [ -n "$END" ] || END=$(date -u +%Y-%m-%d)
+          python3 shipping_subsidy_overall.py \
+            --data-dir ./_data \
+            --start "${{ inputs.promo_start }}" --end "$END" \
+            --json ./_data/subsidy.json > ./_data/subsidy.txt 2>&1 || {
+            echo "::error::subsidy analysis failed"; tail -40 ./_data/subsidy.txt; exit 1; }
+          echo "subsidy report generated: $(wc -l < ./_data/subsidy.txt) lines"
+
       - name: Emit report
         env:
           AUDIENCE_KEY: ${{ secrets.AUDIENCE_KEY }}
         run: |
+          FILES="report.txt roi.json subsidy.txt subsidy.json"
           if [ "${{ inputs.output }}" = "plaintext" ]; then
             echo "::warning::Printing financials in plaintext to a PUBLIC Actions log."
-            echo "===== BEGIN REPORT ====="
-            cat ./_data/report.txt
-            echo "===== END REPORT ====="
+            for f in $FILES; do
+              case "$f" in *.txt)
+                echo "===== BEGIN $f ====="; cat "./_data/$f"; echo "===== END $f =====";;
+              esac
+            done
+          elif [ -n "${{ inputs.recipient_cert_b64 }}" ]; then
+            # Encrypt to a caller-supplied public key. The private half never
+            # leaves the requester, so the ciphertext is safe in a public log
+            # and no shared secret has to be passed around to read it.
+            printf %s '${{ inputs.recipient_cert_b64 }}' | base64 -d > /tmp/recip.pem
+            openssl x509 -in /tmp/recip.pem -noout -subject
+            tar czf - -C ./_data $FILES \
+              | openssl smime -encrypt -aes256 -binary -outform PEM -out /tmp/enc.pem /tmp/recip.pem
+            base64 -w 0 /tmp/enc.pem > ./_data/report.enc.b64
+            echo "Encrypted to supplied public key ($(wc -c < ./_data/report.enc.b64) bytes of base64)."
+            echo "===== BEGIN ENCRYPTED REPORT ====="
+            cat ./_data/report.enc.b64
+            echo ""
+            echo "===== END ENCRYPTED REPORT ====="
           else
             if [ -z "$AUDIENCE_KEY" ]; then
               echo "::error::AUDIENCE_KEY secret is not set; cannot encrypt. Re-run with output=plaintext only if you accept publishing these figures."
               exit 1
             fi
-            tar czf - -C ./_data report.txt roi.json \
+            tar czf - -C ./_data $FILES \
               | openssl enc -aes-256-cbc -pbkdf2 -pass env:AUDIENCE_KEY \
               | base64 -w 0 > ./_data/report.enc.b64
             echo "Encrypted report ($(wc -c < ./_data/report.enc.b64) bytes of base64)."
