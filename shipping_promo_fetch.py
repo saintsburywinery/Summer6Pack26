@@ -14,6 +14,7 @@ import base64
 import csv
 import os
 import sys
+import time
 from datetime import datetime, timedelta
 
 import requests
@@ -54,7 +55,7 @@ def fetch_range(headers, start, end, verbose=True):
     cur = start
     while cur < end:
         nxt = min((cur.replace(day=1) + timedelta(days=32)).replace(day=1), end)
-        cursor, pages = "start", 0
+        cursor, pages, throttled = "start", 0, 0
         while cursor and pages < 400:
             r = requests.get(
                 API,
@@ -67,7 +68,14 @@ def fetch_range(headers, start, end, verbose=True):
                 timeout=60,
             )
             if r.status_code == 429:
-                continue  # rate limited; retry same cursor
+                # Back off and retry the same cursor. Bounded: without a cap and a
+                # sleep this spins on the API for as long as the throttle lasts.
+                throttled += 1
+                if throttled > 8:
+                    raise RuntimeError(f"rate limited {throttled}x at {cur:%Y-%m}")
+                time.sleep(min(2 ** throttled, 60))
+                continue
+            throttled = 0
             r.raise_for_status()
             data = r.json()
             arr = data.get("orders") or next(
