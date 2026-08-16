@@ -45,6 +45,9 @@ concurrency:
   group: shipping-promo-roi
   cancel-in-progress: true
 
+permissions:
+  contents: write
+
 jobs:
   report:
     runs-on: ubuntu-latest
@@ -132,3 +135,27 @@ jobs:
 
       # Deliberately NOT uploading ./_data as an artifact: artifacts on a public
       # repo are world-readable, and it holds raw order-level customer data.
+
+      - name: Commit encrypted report to the reports branch
+        # A long base64 blob read back out of an Actions log gets mangled in
+        # transit, which silently corrupts the archive. Committing the
+        # ciphertext to a branch instead makes retrieval byte-exact. Only the
+        # encrypted blob is committed, never the plaintext or the raw orders.
+        if: inputs.recipient_cert_b64 != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SHA=$(sha256sum ./_data/report.enc.b64 | cut -d' ' -f1)
+          echo "blob sha256: $SHA"
+          rm -rf /tmp/rb && git init -q /tmp/rb && cd /tmp/rb
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          mkdir -p reports
+          cp "$GITHUB_WORKSPACE/_data/report.enc.b64" reports/latest.enc.b64
+          echo "$SHA" > reports/latest.sha256
+          git add -A
+          git commit -q -m "Encrypted shipping report — run ${{ github.run_number }} ($SHA)"
+          git push -q --force \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" \
+            HEAD:refs/heads/reports
+          echo "pushed to branch: reports"
