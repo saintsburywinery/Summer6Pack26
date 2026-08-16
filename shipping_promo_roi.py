@@ -352,14 +352,14 @@ def main():
                 "forgone": float(forgone_total),
                 "avg_subsidy_per_order": float(got["forgone"].mean()) if len(got) else 0,
             },
-            "incrementality": {k: (float(v) if isinstance(v, (int, float, np.floating)) else v)
-                               for k, v in d.items()},
+            "incrementality": {k: float(v) for k, v in d.items()},
             "verdict": {"gross_margin_assumed": gm, "incremental_gross_profit": float(inc_gp),
                         "net_contribution": float(net)},
             "seasonality": {"air_median": float(air), "ground_median": float(ground),
                             "premium": float(premium)},
         }
-        Path(a.json).write_text(json.dumps(payload, indent=2))
+        # numpy scalars (int64/float64) are not JSON-serializable on their own
+        Path(a.json).write_text(json.dumps(payload, indent=2, default=lambda v: v.item()))
         print(f"\n[written] {a.json}")
 
 

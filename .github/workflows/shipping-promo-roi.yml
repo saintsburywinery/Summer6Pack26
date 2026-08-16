@@ -1,0 +1,102 @@
+name: Shipping promo ROI
+
+# Pulls the order history from Commerce7 and runs the $1-shipping-on-cases ROI
+# analysis. Manual trigger only — this is an ad-hoc report, not a cron job.
+#
+# NOTE ON EXPOSURE: this repository is public, so Actions logs and artifacts are
+# world-readable. The report contains revenue, shipping economics and margin, so
+# it is AES-encrypted with the AUDIENCE_KEY secret (the same convention already
+# used for audiences.json.enc) and only the ciphertext is printed. Decrypt with:
+#
+#   printf %s '<base64 blob>' | base64 -d | \
+#     openssl enc -d -aes-256-cbc -pbkdf2 -pass pass:"$AUDIENCE_KEY"
+#
+# Set the "output" input to "plaintext" to print the report directly instead.
+# Only do that if you are comfortable publishing these figures, or after making
+# the repository private.
+
+on:
+  workflow_dispatch:
+    inputs:
+      promo_start:
+        description: "First day of the $1 shipping promo (YYYY-MM-DD)"
+        required: false
+        default: "2026-06-01"
+      promo_end:
+        description: "End of window, exclusive (YYYY-MM-DD). Blank = today."
+        required: false
+        default: ""
+      history_start:
+        description: "How far back to pull, for the prior-year baseline and rate table"
+        required: false
+        default: "2025-05-01"
+      output:
+        description: "encrypted (safe on a public repo) or plaintext"
+        required: false
+        default: encrypted
+        type: choice
+        options: [encrypted, plaintext]
+
+concurrency:
+  group: shipping-promo-roi
+  cancel-in-progress: true
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests pandas numpy
+
+      - name: Fetch orders from Commerce7
+        env:
+          COMMERCE7_APP_ID: ${{ secrets.COMMERCE7_APP_ID }}
+          COMMERCE7_SECRET: ${{ secrets.COMMERCE7_SECRET }}
+          COMMERCE7_TENANT: ${{ secrets.COMMERCE7_TENANT }}
+        run: |
+          python3 shipping_promo_fetch.py \
+            --start "${{ inputs.history_start }}" \
+            --out ./_data
+
+      - name: Run ROI analysis
+        run: |
+          ARGS="--data-dir ./_data --promo-start ${{ inputs.promo_start }}"
+          if [ -n "${{ inputs.promo_end }}" ]; then
+            ARGS="$ARGS --promo-end ${{ inputs.promo_end }}"
+          fi
+          python3 shipping_promo_roi.py $ARGS --json ./_data/roi.json > ./_data/report.txt 2>&1 || {
+            echo "::error::analysis failed"; tail -40 ./_data/report.txt; exit 1; }
+          echo "report generated: $(wc -l < ./_data/report.txt) lines"
+
+      - name: Emit report
+        env:
+          AUDIENCE_KEY: ${{ secrets.AUDIENCE_KEY }}
+        run: |
+          if [ "${{ inputs.output }}" = "plaintext" ]; then
+            echo "::warning::Printing financials in plaintext to a PUBLIC Actions log."
+            echo "===== BEGIN REPORT ====="
+            cat ./_data/report.txt
+            echo "===== END REPORT ====="
+          else
+            if [ -z "$AUDIENCE_KEY" ]; then
+              echo "::error::AUDIENCE_KEY secret is not set; cannot encrypt. Re-run with output=plaintext only if you accept publishing these figures."
+              exit 1
+            fi
+            tar czf - -C ./_data report.txt roi.json \
+              | openssl enc -aes-256-cbc -pbkdf2 -pass env:AUDIENCE_KEY \
+              | base64 -w 0 > ./_data/report.enc.b64
+            echo "Encrypted report ($(wc -c < ./_data/report.enc.b64) bytes of base64)."
+            echo "Decrypt with:"
+            echo "  printf %s '<blob>' | base64 -d | openssl enc -d -aes-256-cbc -pbkdf2 -pass pass:\$AUDIENCE_KEY | tar xzf -"
+            echo "===== BEGIN ENCRYPTED REPORT ====="
+            cat ./_data/report.enc.b64
+            echo ""
+            echo "===== END ENCRYPTED REPORT ====="
+          fi
+
+      # Deliberately NOT uploading ./_data as an artifact: artifacts on a public
+      # repo are world-readable, and it holds raw order-level customer data.
