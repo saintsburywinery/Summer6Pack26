@@ -14,6 +14,7 @@ import base64
 import csv
 import os
 import sys
+import time
 from datetime import datetime, timedelta
 
 import requests
@@ -39,10 +40,30 @@ def first(d, *keys, default=""):
 
 def cents(v):
     """Commerce7 returns money as integer cents."""
+    if isinstance(v, bool) or not isinstance(v, (int, float, str)):
+        return 0.0
     try:
         return round(float(v) / 100.0, 2)
     except (TypeError, ValueError):
         return 0.0
+
+
+def money(d, *keys, default=0.0):
+    """
+    Probe for a monetary field, skipping keys that exist but hold something
+    that isn't a number. The order object carries both `shipping` (an object
+    describing the shipment) and `shipTotal` (the amount charged), so a probe
+    that stops at the first *present* key silently reads $0 for every order.
+    """
+    for k in keys:
+        v = d
+        for part in (k if isinstance(k, (list, tuple)) else [k]):
+            v = v.get(part) if isinstance(v, dict) else None
+            if v is None:
+                break
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return cents(v)
+    return default
 
 
 def fetch_range(headers, start, end, verbose=True):
@@ -54,7 +75,7 @@ def fetch_range(headers, start, end, verbose=True):
     cur = start
     while cur < end:
         nxt = min((cur.replace(day=1) + timedelta(days=32)).replace(day=1), end)
-        cursor, pages = "start", 0
+        cursor, pages, throttled = "start", 0, 0
         while cursor and pages < 400:
             r = requests.get(
                 API,
@@ -67,7 +88,14 @@ def fetch_range(headers, start, end, verbose=True):
                 timeout=60,
             )
             if r.status_code == 429:
-                continue  # rate limited; retry same cursor
+                # Back off and retry the same cursor. Bounded: without a cap and a
+                # sleep this spins on the API for as long as the throttle lasts.
+                throttled += 1
+                if throttled > 8:
+                    raise RuntimeError(f"rate limited {throttled}x at {cur:%Y-%m}")
+                time.sleep(min(2 ** throttled, 60))
+                continue
+            throttled = 0
             r.raise_for_status()
             data = r.json()
             arr = data.get("orders") or next(
@@ -130,15 +158,14 @@ def flatten(orders, verbose=True):
             "paymentStatus": pstat,
             "fulfillmentStatus": o.get("fulfillmentStatus", ""),
             "orderPaidDate": paid,
-            "total": cents(first(o, "total", ["totals", "total"], default=0)),
-            "subTotal": cents(first(o, "subTotal", ["totals", "subTotal"], default=0)),
-            # shipping is the field this whole analysis turns on — probe widely
-            "shippingTotal": cents(first(
-                o, "shipping", "shippingTotal", ["totals", "shipping"],
-                ["totals", "shippingTotal"], default=0)),
-            "tax": cents(first(o, "tax", ["totals", "tax"], default=0)),
-            "discountTotal": cents(first(o, "subTotalAfterItemDiscount", "discountTotal",
-                                         ["totals", "discount"], default=0)),
+            "total": money(o, "total", "totalAfterTip", ["totals", "total"]),
+            "subTotal": money(o, "subTotal", ["totals", "subTotal"]),
+            # The value this whole analysis turns on. `shipTotal` is the amount;
+            # `shipping` is an object, so it must never win the probe.
+            "shippingTotal": money(o, "shipTotal", "shippingTotal",
+                                   ["totals", "shipTotal"], ["totals", "shipping"]),
+            "tax": money(o, "taxTotal", "tax", ["totals", "tax"]),
+            "discountTotal": money(o, "discountTotal", ["totals", "discount"]),
             "discountPct": "",
             "discountCodes": codes,
             "itemQty": sum(int(i.get("quantity") or 0) for i in (o.get("items") or [])),
@@ -151,8 +178,8 @@ def flatten(orders, verbose=True):
 
         for it in o.get("items") or []:
             q = int(it.get("quantity") or 0)
-            price = cents(it.get("price"))
-            orig = cents(first(it, "originalPrice", "price", default=0))
+            price = money(it, "price")
+            orig = money(it, "originalPrice", "price")
             irows.append({
                 "orderId": o.get("id", ""),
                 "lineItemId": it.get("id", ""),
@@ -164,8 +191,8 @@ def flatten(orders, verbose=True):
                 "price": price,
                 "originalTotal": round(orig * q, 2),
                 "priceTotal": round(price * q, 2),
-                "discountTotal": cents(it.get("discountTotal")),
-                "taxTotal": cents(it.get("tax")),
+                "discountTotal": money(it, "discountTotal"),
+                "taxTotal": money(it, "taxTotal", "tax"),
                 "vintage": it.get("vintage", "") or "",
                 "format": it.get("format", "") or "",
                 "channel": chan,
@@ -219,6 +246,19 @@ def main():
     nonzero_ship = sum(1 for r in orows if r["shippingTotal"] > 0)
     print(f"[write] {len(orows):,} orders / {len(irows):,} items -> {a.out}", flush=True)
     print(f"[check] {shipped:,} with ship-to state, {nonzero_ship:,} with shipping > $0", flush=True)
+
+    # Distribution of what was charged for shipping. These are rates customers
+    # already see at checkout, so they are safe to log, and they confirm the
+    # ~$1 promo cohort is actually distinguishable before the analysis runs.
+    bands = [(0, 0.001), (0.001, 1.5), (1.5, 25), (25, 50), (50, 75),
+             (75, 100), (100, 150), (150, 1e9)]
+    print("[check] shipping charge distribution (orders with a ship-to state):", flush=True)
+    for lo, hi in bands:
+        n = sum(1 for r in orows
+                if r["shipToStateCode"] and lo <= r["shippingTotal"] < hi)
+        label = "$0" if hi <= 0.001 else f"${lo:,.0f}-${hi:,.0f}" if hi < 1e9 else "$150+"
+        print(f"          {label:>12}: {n:,}", flush=True)
+
     if nonzero_ship == 0:
         print("[WARN] no order carried a shipping charge — the shipping field name "
               "probe likely missed. Check the sample order keys above.", flush=True)
