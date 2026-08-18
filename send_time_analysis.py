@@ -131,6 +131,14 @@ def main():
     print("\n[1] WHEN SELF-SERVE ORDERS HAPPEN — ALL DAYS, FULL HISTORY")
     g_all = hour_profile(dtc, "Web + Inbound, all days")
 
+    # Inbound is phone, so it can only happen while the phone is staffed — it
+    # manufactures a business-hours peak regardless of customer preference. Web
+    # is self-serve and available around the clock, and is what an SMS link
+    # actually drives, so it is the honest signal for send timing.
+    print("\n[1b] CHANNEL SPLIT — is the peak real, or just staffing?")
+    g_web = hour_profile(dtc[dtc["channel"] == "Web"], "WEB only (self-serve, 24/7)")
+    g_inb = hour_profile(dtc[dtc["channel"] == "Inbound"], "INBOUND only (phone, staffed hours)")
+
     cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=a.recent_days)
     recent = dtc[dtc["orderPaidDate"] >= cutoff]
     print(f"\n[2] LAST {a.recent_days} DAYS ONLY (recency check — has behaviour shifted?)")
@@ -138,10 +146,14 @@ def main():
 
     print(f"\n[3] {wd_name.upper()}S ONLY")
     g_wd = hour_profile(dtc[dtc["weekday"] == a.weekday], f"Web + Inbound, {wd_name}s")
+    g_wd_web = hour_profile(dtc[(dtc["weekday"] == a.weekday) & (dtc["channel"] == "Web")],
+                            f"WEB only, {wd_name}s")
 
     print("\n[4] BEST CONTIGUOUS 3-HOUR WINDOW")
     out = {}
-    for lbl, g in (("all days", g_all), (f"last {a.recent_days}d", g_recent), (wd_name, g_wd)):
+    for lbl, g in (("all days", g_all), ("WEB only", g_web), ("INBOUND only", g_inb),
+                   (f"last {a.recent_days}d", g_recent), (wd_name, g_wd),
+                   (f"{wd_name} WEB", g_wd_web)):
         w = rolling_window(g)
         if w:
             s, e, pct = w
