@@ -50,10 +50,6 @@ on:
         description: "Magnum campaign start date (local)"
         required: false
         default: "2026-08-14"
-      magnum_match:
-        description: "Text to identify the featured magnum"
-        required: false
-        default: "EARTHQUAKE"
       magnum_vintage:
         description: "Vintage of the featured magnum"
         required: false
@@ -121,7 +117,6 @@ jobs:
           python3 magnum_campaign.py \
             --data-dir ./_data \
             --start "${{ inputs.magnum_start }}" \
-            --match "${{ inputs.magnum_match }}" \
             --vintage "${{ inputs.magnum_vintage }}" \
             --json ./_data/magnum.json > ./_data/magnum.txt 2>&1 || {
             echo "::error::magnum analysis failed"; tail -40 ./_data/magnum.txt; exit 1; }
