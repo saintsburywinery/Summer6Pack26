@@ -45,11 +45,15 @@ on:
         required: false
         default: all
         type: choice
-        options: [all, shipping, magnum]
+        options: [all, shipping, magnum, timing]
       magnum_start:
         description: "Magnum campaign start date (local)"
         required: false
         default: "2026-08-14"
+      timing_weekday:
+        description: "Target weekday for the send-time analysis (0=Mon .. 6=Sun)"
+        required: false
+        default: "2"
       magnum_vintage:
         description: "Vintage of the featured magnum"
         required: false
@@ -111,8 +115,17 @@ jobs:
             echo "::error::subsidy analysis failed"; tail -40 ./_data/subsidy.txt; exit 1; }
           echo "subsidy report generated: $(wc -l < ./_data/subsidy.txt) lines"
 
+      - name: Run send-time analysis
+        if: inputs.analyses == 'timing' || inputs.analyses == 'all'
+        run: |
+          python3 send_time_analysis.py \
+            --data-dir ./_data --weekday "${{ inputs.timing_weekday }}" \
+            --json ./_data/timing.json > ./_data/timing.txt 2>&1 || {
+            echo "::error::timing analysis failed"; tail -40 ./_data/timing.txt; exit 1; }
+          echo "timing report generated: $(wc -l < ./_data/timing.txt) lines"
+
       - name: Run magnum campaign analysis
-        if: inputs.analyses != 'shipping'
+        if: inputs.analyses == 'magnum' || inputs.analyses == 'all'
         run: |
           python3 magnum_campaign.py \
             --data-dir ./_data \
@@ -127,7 +140,7 @@ jobs:
           AUDIENCE_KEY: ${{ secrets.AUDIENCE_KEY }}
         run: |
           FILES=""
-          for f in report.txt roi.json subsidy.txt subsidy.json magnum.txt magnum.json; do
+          for f in report.txt roi.json subsidy.txt subsidy.json magnum.txt magnum.json timing.txt timing.json; do
             [ -f "./_data/$f" ] && FILES="$FILES $f"
           done
           echo "bundling:$FILES"
