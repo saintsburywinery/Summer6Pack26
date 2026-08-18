@@ -40,6 +40,24 @@ on:
         description: "Optional base64 X.509 cert. Encrypts to this public key instead of AUDIENCE_KEY. Public keys are safe to publish."
         required: false
         default: ""
+      analyses:
+        description: "which reports to run"
+        required: false
+        default: all
+        type: choice
+        options: [all, shipping, magnum]
+      magnum_start:
+        description: "Magnum campaign start date (local)"
+        required: false
+        default: "2026-08-14"
+      magnum_match:
+        description: "Text to identify the featured magnum"
+        required: false
+        default: "EARTHQUAKE"
+      magnum_vintage:
+        description: "Vintage of the featured magnum"
+        required: false
+        default: "2014"
 
 concurrency:
   group: shipping-promo-roi
@@ -65,11 +83,17 @@ jobs:
           COMMERCE7_SECRET: ${{ secrets.COMMERCE7_SECRET }}
           COMMERCE7_TENANT: ${{ secrets.COMMERCE7_TENANT }}
         run: |
-          python3 shipping_promo_fetch.py \
-            --start "${{ inputs.history_start }}" \
-            --out ./_data
+          # A magnum-only run needs days of history, not 15 months. Pulling the
+          # full range anyway would cost ~3 min per iteration for nothing.
+          START="${{ inputs.history_start }}"
+          if [ "${{ inputs.analyses }}" = "magnum" ]; then
+            START=$(date -u -d "${{ inputs.magnum_start }} -2 days" +%Y-%m-%d)
+          fi
+          echo "fetching from $START"
+          python3 shipping_promo_fetch.py --start "$START" --out ./_data
 
       - name: Run ROI analysis
+        if: inputs.analyses != 'magnum'
         run: |
           ARGS="--data-dir ./_data --promo-start ${{ inputs.promo_start }}"
           if [ -n "${{ inputs.promo_end }}" ]; then
@@ -80,6 +104,7 @@ jobs:
           echo "report generated: $(wc -l < ./_data/report.txt) lines"
 
       - name: Run total shipping subsidy analysis
+        if: inputs.analyses != 'magnum'
         run: |
           END="${{ inputs.promo_end }}"
           [ -n "$END" ] || END=$(date -u +%Y-%m-%d)
@@ -90,11 +115,27 @@ jobs:
             echo "::error::subsidy analysis failed"; tail -40 ./_data/subsidy.txt; exit 1; }
           echo "subsidy report generated: $(wc -l < ./_data/subsidy.txt) lines"
 
+      - name: Run magnum campaign analysis
+        if: inputs.analyses != 'shipping'
+        run: |
+          python3 magnum_campaign.py \
+            --data-dir ./_data \
+            --start "${{ inputs.magnum_start }}" \
+            --match "${{ inputs.magnum_match }}" \
+            --vintage "${{ inputs.magnum_vintage }}" \
+            --json ./_data/magnum.json > ./_data/magnum.txt 2>&1 || {
+            echo "::error::magnum analysis failed"; tail -40 ./_data/magnum.txt; exit 1; }
+          echo "magnum report generated: $(wc -l < ./_data/magnum.txt) lines"
+
       - name: Emit report
         env:
           AUDIENCE_KEY: ${{ secrets.AUDIENCE_KEY }}
         run: |
-          FILES="report.txt roi.json subsidy.txt subsidy.json"
+          FILES=""
+          for f in report.txt roi.json subsidy.txt subsidy.json magnum.txt magnum.json; do
+            [ -f "./_data/$f" ] && FILES="$FILES $f"
+          done
+          echo "bundling:$FILES"
           if [ "${{ inputs.output }}" = "plaintext" ]; then
             echo "::warning::Printing financials in plaintext to a PUBLIC Actions log."
             for f in $FILES; do
