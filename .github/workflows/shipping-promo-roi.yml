@@ -1,0 +1,210 @@
+name: Shipping promo ROI
+
+# Pulls the order history from Commerce7 and runs the $1-shipping-on-cases ROI
+# analysis. Manual trigger only — this is an ad-hoc report, not a cron job.
+#
+# NOTE ON EXPOSURE: this repository is public, so Actions logs and artifacts are
+# world-readable. The report contains revenue, shipping economics and margin, so
+# it is AES-encrypted with the AUDIENCE_KEY secret (the same convention already
+# used for audiences.json.enc) and only the ciphertext is printed. Decrypt with:
+#
+#   printf %s '<base64 blob>' | base64 -d | \
+#     openssl enc -d -aes-256-cbc -pbkdf2 -pass pass:"$AUDIENCE_KEY"
+#
+# Set the "output" input to "plaintext" to print the report directly instead.
+# Only do that if you are comfortable publishing these figures, or after making
+# the repository private.
+
+on:
+  workflow_dispatch:
+    inputs:
+      promo_start:
+        description: "First day of the $1 shipping promo (YYYY-MM-DD)"
+        required: false
+        default: "2026-06-01"
+      promo_end:
+        description: "End of window, exclusive (YYYY-MM-DD). Blank = today."
+        required: false
+        default: ""
+      history_start:
+        description: "How far back to pull, for the prior-year baseline and rate table"
+        required: false
+        default: "2025-05-01"
+      output:
+        description: "encrypted (safe on a public repo) or plaintext"
+        required: false
+        default: encrypted
+        type: choice
+        options: [encrypted, plaintext]
+      recipient_cert_b64:
+        description: "Optional base64 X.509 cert. Encrypts to this public key instead of AUDIENCE_KEY. Public keys are safe to publish."
+        required: false
+        default: ""
+      analyses:
+        description: "which reports to run"
+        required: false
+        default: all
+        type: choice
+        options: [all, shipping, magnum, timing]
+      magnum_start:
+        description: "Magnum campaign start date (local)"
+        required: false
+        default: "2026-08-14"
+      timing_weekday:
+        description: "Target weekday for the send-time analysis (0=Mon .. 6=Sun)"
+        required: false
+        default: "2"
+      magnum_vintage:
+        description: "Vintage of the featured magnum"
+        required: false
+        default: "2014"
+
+concurrency:
+  group: shipping-promo-roi
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests pandas numpy
+
+      - name: Fetch orders from Commerce7
+        env:
+          COMMERCE7_APP_ID: ${{ secrets.COMMERCE7_APP_ID }}
+          COMMERCE7_SECRET: ${{ secrets.COMMERCE7_SECRET }}
+          COMMERCE7_TENANT: ${{ secrets.COMMERCE7_TENANT }}
+        run: |
+          # A magnum-only run needs days of history, not 15 months. Pulling the
+          # full range anyway would cost ~3 min per iteration for nothing.
+          START="${{ inputs.history_start }}"
+          if [ "${{ inputs.analyses }}" = "magnum" ]; then
+            START=$(date -u -d "${{ inputs.magnum_start }} -2 days" +%Y-%m-%d)
+          fi
+          echo "fetching from $START"
+          python3 shipping_promo_fetch.py --start "$START" --out ./_data
+
+      - name: Run ROI analysis
+        if: inputs.analyses != 'magnum'
+        run: |
+          ARGS="--data-dir ./_data --promo-start ${{ inputs.promo_start }}"
+          if [ -n "${{ inputs.promo_end }}" ]; then
+            ARGS="$ARGS --promo-end ${{ inputs.promo_end }}"
+          fi
+          python3 shipping_promo_roi.py $ARGS --json ./_data/roi.json > ./_data/report.txt 2>&1 || {
+            echo "::error::analysis failed"; tail -40 ./_data/report.txt; exit 1; }
+          echo "report generated: $(wc -l < ./_data/report.txt) lines"
+
+      - name: Run total shipping subsidy analysis
+        if: inputs.analyses != 'magnum'
+        run: |
+          END="${{ inputs.promo_end }}"
+          [ -n "$END" ] || END=$(date -u +%Y-%m-%d)
+          python3 shipping_subsidy_overall.py \
+            --data-dir ./_data \
+            --start "${{ inputs.promo_start }}" --end "$END" \
+            --json ./_data/subsidy.json > ./_data/subsidy.txt 2>&1 || {
+            echo "::error::subsidy analysis failed"; tail -40 ./_data/subsidy.txt; exit 1; }
+          echo "subsidy report generated: $(wc -l < ./_data/subsidy.txt) lines"
+
+      - name: Run send-time analysis
+        if: inputs.analyses == 'timing' || inputs.analyses == 'all'
+        run: |
+          python3 send_time_analysis.py \
+            --data-dir ./_data --weekday "${{ inputs.timing_weekday }}" \
+            --json ./_data/timing.json > ./_data/timing.txt 2>&1 || {
+            echo "::error::timing analysis failed"; tail -40 ./_data/timing.txt; exit 1; }
+          echo "timing report generated: $(wc -l < ./_data/timing.txt) lines"
+
+      - name: Run magnum campaign analysis
+        if: inputs.analyses == 'magnum' || inputs.analyses == 'all'
+        run: |
+          python3 magnum_campaign.py \
+            --data-dir ./_data \
+            --start "${{ inputs.magnum_start }}" \
+            --vintage "${{ inputs.magnum_vintage }}" \
+            --json ./_data/magnum.json > ./_data/magnum.txt 2>&1 || {
+            echo "::error::magnum analysis failed"; tail -40 ./_data/magnum.txt; exit 1; }
+          echo "magnum report generated: $(wc -l < ./_data/magnum.txt) lines"
+
+      - name: Emit report
+        env:
+          AUDIENCE_KEY: ${{ secrets.AUDIENCE_KEY }}
+        run: |
+          FILES=""
+          for f in report.txt roi.json subsidy.txt subsidy.json magnum.txt magnum.json timing.txt timing.json; do
+            [ -f "./_data/$f" ] && FILES="$FILES $f"
+          done
+          echo "bundling:$FILES"
+          if [ "${{ inputs.output }}" = "plaintext" ]; then
+            echo "::warning::Printing financials in plaintext to a PUBLIC Actions log."
+            for f in $FILES; do
+              case "$f" in *.txt)
+                echo "===== BEGIN $f ====="; cat "./_data/$f"; echo "===== END $f =====";;
+              esac
+            done
+          elif [ -n "${{ inputs.recipient_cert_b64 }}" ]; then
+            # Encrypt to a caller-supplied public key. The private half never
+            # leaves the requester, so the ciphertext is safe in a public log
+            # and no shared secret has to be passed around to read it.
+            printf %s '${{ inputs.recipient_cert_b64 }}' | base64 -d > /tmp/recip.pem
+            openssl x509 -in /tmp/recip.pem -noout -subject
+            tar czf - -C ./_data $FILES \
+              | openssl smime -encrypt -aes256 -binary -outform PEM -out /tmp/enc.pem /tmp/recip.pem
+            base64 -w 0 /tmp/enc.pem > ./_data/report.enc.b64
+            echo "Encrypted to supplied public key ($(wc -c < ./_data/report.enc.b64) bytes of base64)."
+            echo "===== BEGIN ENCRYPTED REPORT ====="
+            cat ./_data/report.enc.b64
+            echo ""
+            echo "===== END ENCRYPTED REPORT ====="
+          else
+            if [ -z "$AUDIENCE_KEY" ]; then
+              echo "::error::AUDIENCE_KEY secret is not set; cannot encrypt. Re-run with output=plaintext only if you accept publishing these figures."
+              exit 1
+            fi
+            tar czf - -C ./_data $FILES \
+              | openssl enc -aes-256-cbc -pbkdf2 -pass env:AUDIENCE_KEY \
+              | base64 -w 0 > ./_data/report.enc.b64
+            echo "Encrypted report ($(wc -c < ./_data/report.enc.b64) bytes of base64)."
+            echo "Decrypt with:"
+            echo "  printf %s '<blob>' | base64 -d | openssl enc -d -aes-256-cbc -pbkdf2 -pass pass:\$AUDIENCE_KEY | tar xzf -"
+            echo "===== BEGIN ENCRYPTED REPORT ====="
+            cat ./_data/report.enc.b64
+            echo ""
+            echo "===== END ENCRYPTED REPORT ====="
+          fi
+
+      # Deliberately NOT uploading ./_data as an artifact: artifacts on a public
+      # repo are world-readable, and it holds raw order-level customer data.
+
+      - name: Commit encrypted report to the reports branch
+        # A long base64 blob read back out of an Actions log gets mangled in
+        # transit, which silently corrupts the archive. Committing the
+        # ciphertext to a branch instead makes retrieval byte-exact. Only the
+        # encrypted blob is committed, never the plaintext or the raw orders.
+        if: inputs.recipient_cert_b64 != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SHA=$(sha256sum ./_data/report.enc.b64 | cut -d' ' -f1)
+          echo "blob sha256: $SHA"
+          rm -rf /tmp/rb && git init -q /tmp/rb && cd /tmp/rb
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          mkdir -p reports
+          cp "$GITHUB_WORKSPACE/_data/report.enc.b64" reports/latest.enc.b64
+          echo "$SHA" > reports/latest.sha256
+          git add -A
+          git commit -q -m "Encrypted shipping report — run ${{ github.run_number }} ($SHA)"
+          git push -q --force \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" \
+            HEAD:refs/heads/reports
+          echo "pushed to branch: reports"
